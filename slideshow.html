@@ -6,10 +6,8 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <style>
     html,body { height:100%; margin:0; padding:0; background:#000; overflow:hidden; }
-    /* Curseur masqué partout dans la page */
-    body { position: relative; cursor: none; }
-
-    /* L'iframe est zoomée via transform selon le zoom de la page */
+    body { position: relative; } /* curseur visible */
+    /* Iframe zoomable (on remet à 100% avant chaque slide) */
     #slide {
       width:100%;
       height:100%;
@@ -18,24 +16,20 @@
       background:#000;
       transform-origin: 0 0;
     }
-
     #empty {
       display:none; color:#fff; position:absolute; left:50%; top:50%;
       transform:translate(-50%,-50%); font-family:Arial, sans-serif; text-align:center; z-index: 10;
       padding: 8px 12px; background: rgba(0,0,0,0.4); border-radius:8px;
     }
-
     #lockOverlay {
       display:none; position:absolute; left:50%; top:10%; transform:translateX(-50%);
       background: rgba(0,0,0,0.7); color:#fff; padding:10px 16px;
       font-family:Arial, sans-serif; border-radius:6px; font-size:18px; z-index: 1001;
     }
-
-    /* Overlay qui capte les clics — curseur aussi masqué ici */
+    /* Overlay qui capte les clics */
     #clickOverlay {
       position: absolute; inset: 0; z-index: 1000; background: transparent;
-      display: none; /* affiché seulement quand la playlist est prête */
-      cursor: none;
+      display: none; /* visible seulement quand la playlist est prête */
     }
   </style>
 </head>
@@ -133,19 +127,24 @@
       const raw   = entry.url;
       const zoom  = Number(entry.zoom) || 100;
 
-      // Charge l'URL avec anti-cache
+      // 1) RESET complet pour éviter que le zoom "hérite" sur la fin/début
+      iframe.src = "about:blank";
+      iframe.style.transform = "scale(1)";
+      iframe.style.width  = "100%";
+      iframe.style.height = "100%";
+
+      // 2) Charger la nouvelle URL avec anti-cache
       const src = raw + (raw.includes('?') ? '&' : '?') + '_ts=' + Date.now();
       iframe.src = src;
 
-      // Applique le zoom (scale) sur l'iframe
+      // 3) Appliquer le zoom de la nouvelle page
       const scale = zoom / 100;
       iframe.style.transform = `scale(${scale})`;
       iframe.style.width  = (100 / scale) + '%';
       iframe.style.height = (100 / scale) + '%';
 
+      // 4) Avancer l'index + rebase du timer si clic manuel
       idx = (idx + 1) % urls.length;
-
-      // Si action manuelle, on "rebase" le timer
       if (manual && slideTimer) {
         clearInterval(slideTimer);
         slideTimer = setInterval(showNext, delay);
@@ -210,3 +209,4 @@
   </script>
 </body>
 </html>
+

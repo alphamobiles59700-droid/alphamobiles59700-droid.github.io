@@ -6,16 +6,20 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <style>
     html,body { height:100%; margin:0; padding:0; background:#000; overflow:hidden; }
-    body { position: relative; } /* curseur visible */
-    /* Iframe zoomable (on remet à 100% avant chaque slide) */
-    #slide {
-      width:100%;
-      height:100%;
-      border:0;
-      display:block;
-      background:#000;
+    body { position: relative; }
+
+    /* conteneur des iframes superposées */
+    #stage { position: absolute; inset: 0; }
+
+    /* 2 iframes empilées avec fondu croisé */
+    .slideFrame {
+      position: absolute; inset: 0;
+      width:100%; height:100%; border:0; background:#000;
       transform-origin: 0 0;
+      opacity: 0; transition: opacity 250ms linear;
     }
+    .visible { opacity: 1; }
+
     #empty {
       display:none; color:#fff; position:absolute; left:50%; top:50%;
       transform:translate(-50%,-50%); font-family:Arial, sans-serif; text-align:center; z-index: 10;
@@ -26,36 +30,40 @@
       background: rgba(0,0,0,0.7); color:#fff; padding:10px 16px;
       font-family:Arial, sans-serif; border-radius:6px; font-size:18px; z-index: 1001;
     }
-    /* Overlay qui capte les clics */
     #clickOverlay {
       position: absolute; inset: 0; z-index: 1000; background: transparent;
-      display: none; /* visible seulement quand la playlist est prête */
+      display: none; /* rendu actif quand les URLs sont prêtes */
     }
   </style>
 </head>
 <body>
-  <iframe id="slide" src=""></iframe>
+  <div id="stage">
+    <iframe id="frameA" class="slideFrame"></iframe>
+    <iframe id="frameB" class="slideFrame"></iframe>
+  </div>
   <div id="clickOverlay" title="Cliquez pour contrôler le diaporama"></div>
-  <div id="empty">Aucune URL — vérifiez le paramètre <code>?feed=</code> et l’onglet <code>?site=</code></div>
+  <div id="empty">Aucune URL — vérifiez <code>?feed=</code> et <code>?site=</code></div>
   <div id="lockOverlay">VERROUILLÉ — clic gauche pour déverrouiller</div>
 
   <script>
     // État
-    let urls = [];              // [{ url, zoom }, ...]
+    let playlist = [];        // [{ url, zoom }, ...]
     let delay = 5000;
     let idx = 0;
-    let slideTimer = null;
+    let timer = null;
     let locked = false;
+    let current = 0;          // 0 => frameA visible, 1 => frameB visible
 
     // DOM
-    const iframe     = document.getElementById('slide');
-    const emptyDiv   = document.getElementById('empty');
-    const overlay    = document.getElementById('clickOverlay');
-    const lockBanner = document.getElementById('lockOverlay');
+    const frameA    = document.getElementById('frameA');
+    const frameB    = document.getElementById('frameB');
+    const frames    = [frameA, frameB];
+    const overlay   = document.getElementById('clickOverlay');
+    const emptyDiv  = document.getElementById('empty');
+    const lockBanner= document.getElementById('lockOverlay');
 
-    // Paramètres URL
     const params = new URLSearchParams(location.search);
-    const feed = params.get('feed');                         // URL encodée vers votre Web App /exec
+    const feed = params.get('feed');
     const site = (params.get('site') || 'ARRAS').toUpperCase();
 
     if (!feed) {
@@ -63,147 +71,119 @@
       emptyDiv.style.display = 'block';
     }
 
-    // Charge la config depuis le Web App
+    // Utilitaires
+    function applyZoom(frame, zoomPct) {
+      const scale = (Number(zoomPct) || 100) / 100;
+      frame.style.transform = `scale(${scale})`;
+      frame.style.width  = (100 / scale) + '%';
+      frame.style.height = (100 / scale) + '%';
+    }
+
+    function start() { stop(); if (playlist.length) { showNext(); timer = setInterval(showNext, delay); } }
+    function stop()  { if (timer) { clearInterval(timer); timer = null; } }
+
+    // Crossfade: prépare la suivante, puis swap quand chargée
+    function showNext(manual = false) {
+      if (!playlist.length) return;
+
+      const entry = playlist[idx];            // {url, zoom}
+      const next  = frames[1 - current];      // cible invisible
+      const prev  = frames[current];          // visible
+
+      // Prépare la cible (zoom, opacité 0)
+      applyZoom(next, entry.zoom);
+      next.classList.remove('visible');
+
+      // Fixe le src avec anti-cache et attend le load
+      const src = entry.url + (entry.url.includes('?') ? '&' : '?') + '_ts=' + Date.now();
+      next.onload = () => {
+        // Swap en douceur
+        prev.classList.remove('visible');
+        next.classList.add('visible');
+        current = 1 - current;
+
+        // Nettoie le handler pour la prochaine fois
+        next.onload = null;
+      };
+      next.src = src;
+
+      // Avance l'index et rebase le timer si manuel
+      idx = (idx + 1) % playlist.length;
+      if (manual && timer) { clearInterval(timer); timer = setInterval(showNext, delay); }
+    }
+
     async function loadConfig() {
       try {
         if (!feed) return;
-        const feedUrl = decodeURIComponent(feed);
-        const url = `${feedUrl}?site=${encodeURIComponent(site)}&ts=${Date.now()}`;
-        const resp = await fetch(url, { cache: "no-store" });
+        const url = decodeURIComponent(feed) + `?site=${encodeURIComponent(site)}&ts=${Date.now()}`;
+        const resp = await fetch(url, { cache: 'no-store' });
         if (!resp.ok) throw new Error('HTTP ' + resp.status);
         const cfg = await resp.json();
 
-        // IMPORTANT : structure [{url, zoom}]
-        const newUrls  = Array.isArray(cfg.urls) ? cfg.urls : [];
+        const newList = Array.isArray(cfg.urls) ? cfg.urls : [];
         const newDelay = Number(cfg.delay) || 5000;
 
-        const same = JSON.stringify(newUrls) === JSON.stringify(urls) && newDelay === delay;
-        urls  = newUrls;
-        delay = newDelay;
-
-        if (urls.length === 0) {
+        if (!newList.length) {
           emptyDiv.textContent = `Aucune URL pour ${site}`;
           emptyDiv.style.display = 'block';
-          iframe.style.display = 'none';
           overlay.style.display = 'none';
-          stopSlides();
+          frames[0].classList.remove('visible');
+          frames[1].classList.remove('visible');
+          stop();
           return;
-        } else {
-          emptyDiv.style.display = 'none';
-          iframe.style.display = 'block';
-          overlay.style.display = 'block'; // activer l'overlay quand prêt
         }
+
+        emptyDiv.style.display = 'none';
+        overlay.style.display = 'block';
+
+        const same = JSON.stringify(newList) === JSON.stringify(playlist) && newDelay === delay;
+        playlist = newList; delay = newDelay;
 
         if (!same && !locked) {
           idx = 0;
-          startSlides();
+          // charge immédiatement la première diapo dans la frame courante pour éviter le noir initial
+          const first = playlist[0];
+          applyZoom(frames[current], first.zoom);
+          frames[current].src = first.url + (first.url.includes('?') ? '&' : '?') + '_ts=' + Date.now();
+          frames[current].classList.add('visible');
+          idx = 1 % playlist.length;
+          start();
         }
       } catch (e) {
-        console.error('Erreur loadConfig:', e);
+        console.error(e);
         emptyDiv.textContent = 'Erreur de chargement de la configuration';
         emptyDiv.style.display = 'block';
         overlay.style.display = 'none';
-      }
-    }
-
-    function startSlides() {
-      stopSlides();
-      if (urls.length === 0) return;
-      showNext();
-      slideTimer = setInterval(showNext, delay);
-    }
-
-    function stopSlides() {
-      if (slideTimer) {
-        clearInterval(slideTimer);
-        slideTimer = null;
-      }
-    }
-
-    function showNext(manual = false) {
-      if (urls.length === 0) return;
-
-      const entry = urls[idx];                // { url, zoom }
-      const raw   = entry.url;
-      const zoom  = Number(entry.zoom) || 100;
-
-      // 1) RESET complet pour éviter que le zoom "hérite" sur la fin/début
-      iframe.src = "about:blank";
-      iframe.style.transform = "scale(1)";
-      iframe.style.width  = "100%";
-      iframe.style.height = "100%";
-
-      // 2) Charger la nouvelle URL avec anti-cache
-      const src = raw + (raw.includes('?') ? '&' : '?') + '_ts=' + Date.now();
-      iframe.src = src;
-
-      // 3) Appliquer le zoom de la nouvelle page
-      const scale = zoom / 100;
-      iframe.style.transform = `scale(${scale})`;
-      iframe.style.width  = (100 / scale) + '%';
-      iframe.style.height = (100 / scale) + '%';
-
-      // 4) Avancer l'index + rebase du timer si clic manuel
-      idx = (idx + 1) % urls.length;
-      if (manual && slideTimer) {
-        clearInterval(slideTimer);
-        slideTimer = setInterval(showNext, delay);
+        stop();
       }
     }
 
     function setLocked(state) {
       locked = state;
-      if (locked) {
-        lockBanner.style.display = 'block';
-        stopSlides(); // pause
-      } else {
-        lockBanner.style.display = 'none';
-        startSlides(); // relance
-      }
+      if (locked) { lockBanner.style.display = 'block'; stop(); }
+      else { lockBanner.style.display = 'none'; start(); }
     }
 
-    // Bloquer le menu contextuel global
+    // Interactions
     window.addEventListener('contextmenu', e => e.preventDefault());
-
-    // Clics capturés par l'overlay (au-dessus de l'iframe)
     overlay.addEventListener('contextmenu', e => e.preventDefault());
     overlay.addEventListener('mousedown', e => {
-      // 0 = gauche, 2 = droit
-      if (e.button === 0) {               // gauche
-        if (locked) setLocked(false);     // déverrouille
-        else showNext(true);              // suivant
-      } else if (e.button === 2) {        // droit
-        if (!locked) setLocked(true);     // verrouille
-      }
+      if (e.button === 0) { if (locked) setLocked(false); else showNext(true); }
+      else if (e.button === 2) { if (!locked) setLocked(true); }
     });
-
-    // Tactile : tap = suivant ; appui long ~600ms = verrouiller
-    (function attachTouchHandlers() {
-      let t = null, start = 0;
-      overlay.addEventListener('touchstart', () => {
-        start = Date.now();
-        t = setTimeout(() => { setLocked(true); }, 600);
-      }, { passive: true });
-      overlay.addEventListener('touchend', () => {
-        const d = Date.now() - start;
-        if (t) { clearTimeout(t); t = null; }
-        if (d < 600) { // court tap
-          if (locked) setLocked(false);
-          else showNext(true);
-        }
-      }, { passive: true });
+    (function(){ let t=null,s=0;
+      overlay.addEventListener('touchstart',()=>{s=Date.now(); t=setTimeout(()=>setLocked(true),600);},{passive:true});
+      overlay.addEventListener('touchend',()=>{const d=Date.now()-s; if(t){clearTimeout(t);t=null;} if(d<600){ if(locked) setLocked(false); else showNext(true); }},{passive:true});
     })();
-
-    // Raccourcis clavier (si mini-clavier branché)
     window.addEventListener('keydown', e => {
       if (e.code === 'Space') { e.preventDefault(); if (!locked) showNext(true); }
-      else if (e.key === 'l' || e.key === 'L') { setLocked(!locked); }
+      else if (e.key === 'l' || e.key === 'L') setLocked(!locked);
     });
 
-    // Démarrage + relecture périodique de la config
+    // Démarrage
     if (feed) {
       loadConfig();
-      setInterval(loadConfig, 60 * 1000);
+      setInterval(loadConfig, 60_000);
       document.addEventListener('visibilitychange', () => { if (!document.hidden) loadConfig(); });
     }
   </script>

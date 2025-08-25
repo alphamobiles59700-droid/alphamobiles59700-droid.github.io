@@ -25,4 +25,188 @@
       padding: 8px 12px; background: rgba(0,0,0,0.4); border-radius:8px;
     }
 
-    #lockO
+    #lockOverlay {
+      display:none; position:absolute; left:50%; top:10%; transform:translateX(-50%);
+      background: rgba(0,0,0,0.7); color:#fff; padding:10px 16px;
+      font-family:Arial, sans-serif; border-radius:6px; font-size:18px; z-index: 1001;
+    }
+
+    /* Overlay qui capte les clics — curseur aussi masqué ici */
+    #clickOverlay {
+      position: absolute; inset: 0; z-index: 1000; background: transparent;
+      display: none; /* affiché seulement quand la playlist est prête */
+      cursor: none;
+    }
+  </style>
+</head>
+<body>
+  <iframe id="slide" src=""></iframe>
+  <div id="clickOverlay" title="Cliquez pour contrôler le diaporama"></div>
+  <div id="empty">Aucune URL — vérifiez le paramètre <code>?feed=</code> et l’onglet <code>?site=</code></div>
+  <div id="lockOverlay">VERROUILLÉ — clic gauche pour déverrouiller</div>
+
+  <script>
+    // État
+    let urls = [];              // [{ url, zoom }, ...]
+    let delay = 5000;
+    let idx = 0;
+    let slideTimer = null;
+    let locked = false;
+
+    // DOM
+    const iframe     = document.getElementById('slide');
+    const emptyDiv   = document.getElementById('empty');
+    const overlay    = document.getElementById('clickOverlay');
+    const lockBanner = document.getElementById('lockOverlay');
+
+    // Paramètres URL
+    const params = new URLSearchParams(location.search);
+    const feed = params.get('feed');                         // URL encodée vers votre Web App /exec
+    const site = (params.get('site') || 'ARRAS').toUpperCase();
+
+    if (!feed) {
+      emptyDiv.textContent = 'Paramètre ?feed manquant';
+      emptyDiv.style.display = 'block';
+    }
+
+    // Charge la config depuis le Web App
+    async function loadConfig() {
+      try {
+        if (!feed) return;
+        const feedUrl = decodeURIComponent(feed);
+        const url = `${feedUrl}?site=${encodeURIComponent(site)}&ts=${Date.now()}`;
+        const resp = await fetch(url, { cache: "no-store" });
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        const cfg = await resp.json();
+
+        // IMPORTANT : structure [{url, zoom}]
+        const newUrls  = Array.isArray(cfg.urls) ? cfg.urls : [];
+        const newDelay = Number(cfg.delay) || 5000;
+
+        const same = JSON.stringify(newUrls) === JSON.stringify(urls) && newDelay === delay;
+        urls  = newUrls;
+        delay = newDelay;
+
+        if (urls.length === 0) {
+          emptyDiv.textContent = `Aucune URL pour ${site}`;
+          emptyDiv.style.display = 'block';
+          iframe.style.display = 'none';
+          overlay.style.display = 'none';
+          stopSlides();
+          return;
+        } else {
+          emptyDiv.style.display = 'none';
+          iframe.style.display = 'block';
+          overlay.style.display = 'block'; // activer l'overlay quand prêt
+        }
+
+        if (!same && !locked) {
+          idx = 0;
+          startSlides();
+        }
+      } catch (e) {
+        console.error('Erreur loadConfig:', e);
+        emptyDiv.textContent = 'Erreur de chargement de la configuration';
+        emptyDiv.style.display = 'block';
+        overlay.style.display = 'none';
+      }
+    }
+
+    function startSlides() {
+      stopSlides();
+      if (urls.length === 0) return;
+      showNext();
+      slideTimer = setInterval(showNext, delay);
+    }
+
+    function stopSlides() {
+      if (slideTimer) {
+        clearInterval(slideTimer);
+        slideTimer = null;
+      }
+    }
+
+    function showNext(manual = false) {
+      if (urls.length === 0) return;
+
+      const entry = urls[idx];                // { url, zoom }
+      const raw   = entry.url;
+      const zoom  = Number(entry.zoom) || 100;
+
+      // Charge l'URL avec anti-cache
+      const src = raw + (raw.includes('?') ? '&' : '?') + '_ts=' + Date.now();
+      iframe.src = src;
+
+      // Applique le zoom (scale) sur l'iframe
+      const scale = zoom / 100;
+      iframe.style.transform = `scale(${scale})`;
+      iframe.style.width  = (100 / scale) + '%';
+      iframe.style.height = (100 / scale) + '%';
+
+      idx = (idx + 1) % urls.length;
+
+      // Si action manuelle, on "rebase" le timer
+      if (manual && slideTimer) {
+        clearInterval(slideTimer);
+        slideTimer = setInterval(showNext, delay);
+      }
+    }
+
+    function setLocked(state) {
+      locked = state;
+      if (locked) {
+        lockBanner.style.display = 'block';
+        stopSlides(); // pause
+      } else {
+        lockBanner.style.display = 'none';
+        startSlides(); // relance
+      }
+    }
+
+    // Bloquer le menu contextuel global
+    window.addEventListener('contextmenu', e => e.preventDefault());
+
+    // Clics capturés par l'overlay (au-dessus de l'iframe)
+    overlay.addEventListener('contextmenu', e => e.preventDefault());
+    overlay.addEventListener('mousedown', e => {
+      // 0 = gauche, 2 = droit
+      if (e.button === 0) {               // gauche
+        if (locked) setLocked(false);     // déverrouille
+        else showNext(true);              // suivant
+      } else if (e.button === 2) {        // droit
+        if (!locked) setLocked(true);     // verrouille
+      }
+    });
+
+    // Tactile : tap = suivant ; appui long ~600ms = verrouiller
+    (function attachTouchHandlers() {
+      let t = null, start = 0;
+      overlay.addEventListener('touchstart', () => {
+        start = Date.now();
+        t = setTimeout(() => { setLocked(true); }, 600);
+      }, { passive: true });
+      overlay.addEventListener('touchend', () => {
+        const d = Date.now() - start;
+        if (t) { clearTimeout(t); t = null; }
+        if (d < 600) { // court tap
+          if (locked) setLocked(false);
+          else showNext(true);
+        }
+      }, { passive: true });
+    })();
+
+    // Raccourcis clavier (si mini-clavier branché)
+    window.addEventListener('keydown', e => {
+      if (e.code === 'Space') { e.preventDefault(); if (!locked) showNext(true); }
+      else if (e.key === 'l' || e.key === 'L') { setLocked(!locked); }
+    });
+
+    // Démarrage + relecture périodique de la config
+    if (feed) {
+      loadConfig();
+      setInterval(loadConfig, 60 * 1000);
+      document.addEventListener('visibilitychange', () => { if (!document.hidden) loadConfig(); });
+    }
+  </script>
+</body>
+</html>

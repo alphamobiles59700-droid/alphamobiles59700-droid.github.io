@@ -8,18 +8,9 @@
     html,body { height:100%; margin:0; padding:0; background:#000; overflow:hidden; }
     body { position: relative; }
 
-    /* conteneur des iframes superposées */
-    #stage { position: absolute; inset: 0; }
-
-    /* 2 iframes empilées avec fondu croisé */
-    .slideFrame {
-      position: absolute; inset: 0;
-      width:100%; height:100%; border:0; background:#000;
-      transform-origin: 0 0;
-      opacity: 0; transition: opacity 250ms linear;
+    #slide {
+      width:100%; height:100%; border:0; display:block; background:#000;
     }
-    .visible { opacity: 1; }
-
     #empty {
       display:none; color:#fff; position:absolute; left:50%; top:50%;
       transform:translate(-50%,-50%); font-family:Arial, sans-serif; text-align:center; z-index: 10;
@@ -30,40 +21,33 @@
       background: rgba(0,0,0,0.7); color:#fff; padding:10px 16px;
       font-family:Arial, sans-serif; border-radius:6px; font-size:18px; z-index: 1001;
     }
+    /* Overlay qui capte les clics */
     #clickOverlay {
       position: absolute; inset: 0; z-index: 1000; background: transparent;
-      display: none; /* rendu actif quand les URLs sont prêtes */
+      display: none; /* activé quand la playlist est prête */
     }
   </style>
 </head>
 <body>
-  <div id="stage">
-    <iframe id="frameA" class="slideFrame"></iframe>
-    <iframe id="frameB" class="slideFrame"></iframe>
-  </div>
+  <iframe id="slide" src=""></iframe>
   <div id="clickOverlay" title="Cliquez pour contrôler le diaporama"></div>
   <div id="empty">Aucune URL — vérifiez <code>?feed=</code> et <code>?site=</code></div>
   <div id="lockOverlay">VERROUILLÉ — clic gauche pour déverrouiller</div>
 
   <script>
-    // État
-    let playlist = [];        // [{ url, zoom }, ...]
+    let urls = [];        // ["https://...", ...]
     let delay = 5000;
     let idx = 0;
     let timer = null;
     let locked = false;
-    let current = 0;          // 0 => frameA visible, 1 => frameB visible
 
-    // DOM
-    const frameA    = document.getElementById('frameA');
-    const frameB    = document.getElementById('frameB');
-    const frames    = [frameA, frameB];
-    const overlay   = document.getElementById('clickOverlay');
-    const emptyDiv  = document.getElementById('empty');
-    const lockBanner= document.getElementById('lockOverlay');
+    const iframe = document.getElementById('slide');
+    const overlay = document.getElementById('clickOverlay');
+    const emptyDiv = document.getElementById('empty');
+    const lockBanner = document.getElementById('lockOverlay');
 
     const params = new URLSearchParams(location.search);
-    const feed = params.get('feed');
+    const feed = params.get('feed');  // URL encodée vers /exec
     const site = (params.get('site') || 'ARRAS').toUpperCase();
 
     if (!feed) {
@@ -71,105 +55,79 @@
       emptyDiv.style.display = 'block';
     }
 
-    // Utilitaires
-    function applyZoom(frame, zoomPct) {
-      const scale = (Number(zoomPct) || 100) / 100;
-      frame.style.transform = `scale(${scale})`;
-      frame.style.width  = (100 / scale) + '%';
-      frame.style.height = (100 / scale) + '%';
-    }
-
-    function start() { stop(); if (playlist.length) { showNext(); timer = setInterval(showNext, delay); } }
-    function stop()  { if (timer) { clearInterval(timer); timer = null; } }
-
-    // Crossfade: prépare la suivante, puis swap quand chargée
-    function showNext(manual = false) {
-      if (!playlist.length) return;
-
-      const entry = playlist[idx];            // {url, zoom}
-      const next  = frames[1 - current];      // cible invisible
-      const prev  = frames[current];          // visible
-
-      // Prépare la cible (zoom, opacité 0)
-      applyZoom(next, entry.zoom);
-      next.classList.remove('visible');
-
-      // Fixe le src avec anti-cache et attend le load
-      const src = entry.url + (entry.url.includes('?') ? '&' : '?') + '_ts=' + Date.now();
-      next.onload = () => {
-        // Swap en douceur
-        prev.classList.remove('visible');
-        next.classList.add('visible');
-        current = 1 - current;
-
-        // Nettoie le handler pour la prochaine fois
-        next.onload = null;
-      };
-      next.src = src;
-
-      // Avance l'index et rebase le timer si manuel
-      idx = (idx + 1) % playlist.length;
-      if (manual && timer) { clearInterval(timer); timer = setInterval(showNext, delay); }
-    }
-
     async function loadConfig() {
       try {
         if (!feed) return;
         const url = decodeURIComponent(feed) + `?site=${encodeURIComponent(site)}&ts=${Date.now()}`;
-        const resp = await fetch(url, { cache: 'no-store' });
+        const resp = await fetch(url, { cache: "no-store" });
         if (!resp.ok) throw new Error('HTTP ' + resp.status);
         const cfg = await resp.json();
 
-        const newList = Array.isArray(cfg.urls) ? cfg.urls : [];
+        const newUrls  = Array.isArray(cfg.urls) ? cfg.urls : [];
         const newDelay = Number(cfg.delay) || 5000;
 
-        if (!newList.length) {
+        const same = JSON.stringify(newUrls) === JSON.stringify(urls) && newDelay === delay;
+        urls = newUrls; delay = newDelay;
+
+        if (urls.length === 0) {
           emptyDiv.textContent = `Aucune URL pour ${site}`;
           emptyDiv.style.display = 'block';
+          iframe.style.display = 'none';
           overlay.style.display = 'none';
-          frames[0].classList.remove('visible');
-          frames[1].classList.remove('visible');
-          stop();
+          stopSlides();
           return;
+        } else {
+          emptyDiv.style.display = 'none';
+          iframe.style.display = 'block';
+          overlay.style.display = 'block';
         }
-
-        emptyDiv.style.display = 'none';
-        overlay.style.display = 'block';
-
-        const same = JSON.stringify(newList) === JSON.stringify(playlist) && newDelay === delay;
-        playlist = newList; delay = newDelay;
 
         if (!same && !locked) {
           idx = 0;
-          // charge immédiatement la première diapo dans la frame courante pour éviter le noir initial
-          const first = playlist[0];
-          applyZoom(frames[current], first.zoom);
-          frames[current].src = first.url + (first.url.includes('?') ? '&' : '?') + '_ts=' + Date.now();
-          frames[current].classList.add('visible');
-          idx = 1 % playlist.length;
-          start();
+          startSlides();
         }
       } catch (e) {
-        console.error(e);
+        console.error('Erreur loadConfig:', e);
         emptyDiv.textContent = 'Erreur de chargement de la configuration';
         emptyDiv.style.display = 'block';
         overlay.style.display = 'none';
-        stop();
+      }
+    }
+
+    function startSlides() {
+      stopSlides();
+      if (!urls.length) return;
+      showNext();
+      timer = setInterval(showNext, delay);
+    }
+    function stopSlides() {
+      if (timer) { clearInterval(timer); timer = null; }
+    }
+
+    function showNext(manual = false) {
+      if (!urls.length) return;
+      const raw = urls[idx];
+      const src = raw + (raw.includes('?') ? '&' : '?') + '_ts=' + Date.now(); // anti-cache
+      iframe.src = src;
+      idx = (idx + 1) % urls.length;
+
+      if (manual && timer) {
+        clearInterval(timer);
+        timer = setInterval(showNext, delay);
       }
     }
 
     function setLocked(state) {
       locked = state;
-      if (locked) { lockBanner.style.display = 'block'; stop(); }
-      else { lockBanner.style.display = 'none'; start(); }
+      if (locked) { lockBanner.style.display = 'block'; stopSlides(); }
+      else { lockBanner.style.display = 'none'; startSlides(); }
     }
 
-    // Interactions
     window.addEventListener('contextmenu', e => e.preventDefault());
     overlay.addEventListener('contextmenu', e => e.preventDefault());
     overlay.addEventListener('mousedown', e => {
-      if (e.button === 0) { if (locked) setLocked(false); else showNext(true); }
-      else if (e.button === 2) { if (!locked) setLocked(true); }
+      if (e.button === 0) { if (locked) setLocked(false); else showNext(true); }  // gauche
+      else if (e.button === 2) { if (!locked) setLocked(true); }                  // droit
     });
     (function(){ let t=null,s=0;
       overlay.addEventListener('touchstart',()=>{s=Date.now(); t=setTimeout(()=>setLocked(true),600);},{passive:true});
@@ -180,10 +138,9 @@
       else if (e.key === 'l' || e.key === 'L') setLocked(!locked);
     });
 
-    // Démarrage
     if (feed) {
       loadConfig();
-      setInterval(loadConfig, 60_000);
+      setInterval(loadConfig, 60 * 1000);
       document.addEventListener('visibilitychange', () => { if (!document.hidden) loadConfig(); });
     }
   </script>
